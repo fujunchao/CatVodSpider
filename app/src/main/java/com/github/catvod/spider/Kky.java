@@ -5,11 +5,15 @@ import android.util.Base64;
 import android.util.Log;
 
 import com.github.catvod.crawler.Spider;
-import com.github.catvod.net.Net;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -30,7 +34,7 @@ import java.util.regex.Pattern;
  *  2) 播放页 var player_aaaa.url 是 kkyplayer 的 vid 令牌，POST /kkyplayer/api.php 拿回后解密成直链。
  *  3) api.php 有概率返回 urlmode=1 的诱饵，间隔 1.2s 重试最多 6 次。
  *
- * 与 py 版的差异：HTTP 走宿主注入的 Net（壳的 OkHttp 连接池），会话用 net.session() 保持 cookie。
+ * 与 py 版的差异：HTTP 用 HttpURLConnection 直连（不依赖壳的 Spider.net 字段，兼容 FongMi 5.6.4），Cookie 手工维护。
  */
 public class Kky extends Spider {
 
@@ -51,7 +55,7 @@ public class Kky extends Spider {
     private static final Pattern RE_YEAR = Pattern.compile("^\\d{4}$");
 
     private String host = BASE;
-    private Net sess;
+    private final Map<String, String> cookies = new LinkedHashMap<>();
     private final Map<String, Object[]> cache = new HashMap<>();
 
     @Override
@@ -66,7 +70,7 @@ public class Kky extends Spider {
             } catch (Exception ignored) {
             }
         }
-        sess = null;
+        cookies.clear();
         cache.clear();
         Log.i(TAG, "[KKY] init host=" + host + " " + (System.currentTimeMillis() - t0) + "ms");
     }
@@ -89,26 +93,69 @@ public class Kky extends Spider {
 
     // ---------------- HTTP ----------------
 
-    private Net session() {
-        if (sess == null) sess = net == null ? new Net() : net.session();
-        return sess;
-    }
-
     private String raw(String method, String url, String body, String referer, Map<String, String> extra) {
         long t0 = System.currentTimeMillis();
-        Map<String, String> headers = new LinkedHashMap<>();
-        headers.put("User-Agent", UA);
-        headers.put("Accept-Language", "zh-CN,zh;q=0.9");
-        headers.put("Referer", referer == null || referer.isEmpty() ? host + "/" : referer);
-        if (extra != null) headers.putAll(extra);
         String out = "";
+        HttpURLConnection conn = null;
         try {
-            out = "POST".equals(method) ? session().post(url, body == null ? "" : body, headers) : session().get(url, headers);
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod(method);
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(20000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", UA);
+            conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
+            conn.setRequestProperty("Referer", referer == null || referer.isEmpty() ? host + "/" : referer);
+            if (!cookies.isEmpty()) conn.setRequestProperty("Cookie", cookieHeader());
+            if (extra != null) for (Map.Entry<String, String> e : extra.entrySet()) conn.setRequestProperty(e.getKey(), e.getValue());
+            if ("POST".equals(method)) {
+                conn.setDoOutput(true);
+                byte[] bs = (body == null ? "" : body).getBytes(StandardCharsets.UTF_8);
+                conn.setFixedLengthStreamingMode(bs.length);
+                OutputStream os = conn.getOutputStream();
+                os.write(bs);
+                os.close();
+            }
+            int code = conn.getResponseCode();
+            InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            out = readAll(is);
+            saveCookies(conn);
         } catch (Exception e) {
             Log.w(TAG, "[KKY] request fail " + method + " " + cut(url) + ": " + e);
         }
         Log.i(TAG, "[KKY] http " + method + " " + (System.currentTimeMillis() - t0) + "ms len=" + (out == null ? 0 : out.length()) + " " + cut(url));
         return out == null ? "" : out;
+    }
+
+    private static String readAll(InputStream is) throws Exception {
+        if (is == null) return "";
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+        is.close();
+        return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private void saveCookies(HttpURLConnection conn) {
+        for (Map.Entry<String, List<String>> e : conn.getHeaderFields().entrySet()) {
+            if (e.getKey() == null || !e.getKey().equalsIgnoreCase("Set-Cookie")) continue;
+            for (String v : e.getValue()) {
+                int semi = v.indexOf(';');
+                String kv = semi > 0 ? v.substring(0, semi) : v;
+                int eq = kv.indexOf('=');
+                if (eq > 0) cookies.put(kv.substring(0, eq).trim(), kv.substring(eq + 1).trim());
+            }
+        }
+    }
+
+    private String cookieHeader() {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> e : cookies.entrySet()) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(e.getKey()).append('=').append(e.getValue());
+        }
+        return sb.toString();
     }
 
     private String httpGet(String url, String referer) {
