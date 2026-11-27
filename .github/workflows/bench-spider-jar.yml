@@ -73,6 +73,7 @@ jobs:
                         '"javax/xml/namespace", "org/slf4j", "org/xmlpull/v1"')
           s = s.replace('Join-Path $smali "com\\github\\catvod"',
                         'Join-Path $smali "com/github/catvod"')
+          s = s.replace("TrimEnd('\\\\')", "TrimEnd([char[]]@('/', '\\\\'))")
           assert s != before, 'patch did not apply'
           p.write_text(s, encoding='utf-8')
           PY
