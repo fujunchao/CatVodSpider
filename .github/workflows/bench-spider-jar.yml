@@ -85,7 +85,9 @@ jobs:
           echo "ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
 
       - name: Build spider JAR
-        run: ./gradlew spiderJar --no-daemon --console=plain
+        run: |
+          chmod +x gradlew
+          ./gradlew spiderJar --no-daemon --console=plain
 
       - name: Report artifact
         if: always()
